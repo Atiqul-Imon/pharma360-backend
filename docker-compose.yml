@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: pharma360-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - pharma360-network
+
+  backend:
+    build: .
+    container_name: pharma360-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "5000:5000"
+    depends_on:
+      - redis
+    volumes:
+      - ./uploads:/app/uploads
+    networks:
+      - pharma360-network
+
+volumes:
+  redis_data:
+
+networks:
+  pharma360-network:
+    driver: bridge
+
