@@ -20,6 +20,13 @@ if [ "$EUID" -eq 0 ]; then
    exit 1
 fi
 
+# Configure needrestart for non-interactive mode
+echo -e "${GREEN}⚙️  Configuring non-interactive mode...${NC}"
+sudo mkdir -p /etc/needrestart/conf.d
+echo '$nrconf{restart} = "a";' | sudo tee /etc/needrestart/conf.d/99-pharma360.conf > /dev/null
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+
 # Update system
 echo -e "${GREEN}📦 Updating system packages...${NC}"
 sudo apt update && sudo apt upgrade -y
