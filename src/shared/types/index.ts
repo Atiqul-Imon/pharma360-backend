@@ -3,12 +3,28 @@ import { Types } from 'mongoose';
 
 // User roles
 export enum UserRole {
-  ADMIN = 'admin',
   OWNER = 'owner',
-  MANAGER = 'manager',
-  PHARMACIST = 'pharmacist',
-  CASHIER = 'cashier',
+  ADMIN = 'admin',
+  STAFF = 'staff',
 }
+
+export const Permissions = {
+  ALL: '*',
+  SALES_READ: 'sales.read',
+  SALES_CREATE: 'sales.create',
+  SALES_MANAGE: 'sales.manage',
+  INVENTORY_READ: 'inventory.read',
+  INVENTORY_MANAGE: 'inventory.manage',
+  CUSTOMERS_READ: 'customers.read',
+  CUSTOMERS_CREATE: 'customers.create',
+  CUSTOMERS_UPDATE: 'customers.update',
+  CUSTOMERS_MANAGE: 'customers.manage',
+  PURCHASES_MANAGE: 'purchases.manage',
+  REPORTS_VIEW: 'reports.view',
+  USERS_MANAGE: 'users.manage',
+} as const;
+
+export type Permission = (typeof Permissions)[keyof typeof Permissions];
 
 // User interface
 export interface IUser {
@@ -27,6 +43,13 @@ export interface IUser {
 }
 
 // Tenant interface
+export enum SubscriptionPlan {
+  BASIC = 'basic',
+  PROFESSIONAL = 'professional',
+  ENTERPRISE = 'enterprise',
+  HOSPITAL = 'hospital',
+}
+
 export interface ITenant {
   _id: Types.ObjectId;
   pharmacyName: string;
@@ -35,7 +58,7 @@ export interface ITenant {
   phone: string;
   address: string;
   licenseNumber: string;
-  subscriptionPlan: 'basic' | 'professional' | 'enterprise' | 'hospital';
+  subscriptionPlan: SubscriptionPlan;
   subscriptionStatus: 'active' | 'trial' | 'suspended' | 'cancelled';
   subscriptionStartDate: Date;
   subscriptionEndDate: Date;
@@ -116,6 +139,11 @@ export enum InventoryStatus {
   OUT_OF_STOCK = 'out_of_stock',
 }
 
+export enum CounterStatus {
+  ACTIVE = 'active',
+  INACTIVE = 'inactive',
+}
+
 // Payment Method
 export enum PaymentMethod {
   CASH = 'cash',
@@ -157,23 +185,30 @@ export enum PrescriptionStatus {
 export const CacheKeys = {
   MEDICINE: (id: string) => `medicine:${id}`,
   MEDICINE_LIST: (tenantId: string) => `medicines:${tenantId}`,
+  MEDICINE_SEARCH: (tenantId: string, hash: string) => `medicines:search:${tenantId}:${hash}`,
+  MEDICINE_SEARCH_PATTERN: (tenantId: string) => `medicines:search:${tenantId}:*`,
   INVENTORY_SUMMARY: (tenantId: string) => `inventory:summary:${tenantId}`,
   SALES_TODAY: (tenantId: string) => `sales:today:${tenantId}`,
   LOW_STOCK_ALERTS: (tenantId: string) => `alerts:lowstock:${tenantId}`,
   EXPIRY_ALERTS: (tenantId: string) => `alerts:expiry:${tenantId}`,
+  SUPPLIER_LIST: (tenantId: string, hash: string) => `suppliers:list:${tenantId}:${hash}`,
+  SUPPLIER_LIST_PATTERN: (tenantId: string) => `suppliers:list:${tenantId}:*`,
   USER: (id: string) => `user:${id}`,
   TENANT: (id: string) => `tenant:${id}`,
+  CACHE_STATS: (tenantId: string, tag: string) => `cache:stats:${tenantId}:${tag}`,
 };
 
 // Cache TTL (in seconds)
 export const CacheTTL = {
   MEDICINE: 3600, // 1 hour
   MEDICINE_LIST: 1800, // 30 minutes
+  MEDICINE_SEARCH: 600, // 10 minutes
   INVENTORY_SUMMARY: 300, // 5 minutes
   SALES_TODAY: 3600, // 1 hour
   ALERTS: 1800, // 30 minutes
   USER: 3600, // 1 hour
   TENANT: 7200, // 2 hours
+  SUPPLIER_LIST: 600, // 10 minutes
 };
 
 export default {
@@ -181,11 +216,13 @@ export default {
   MedicineCategory,
   MedicineSchedule,
   InventoryStatus,
+  CounterStatus,
   PaymentMethod,
   SaleStatus,
   PurchaseStatus,
   PaymentStatus,
   PrescriptionStatus,
+  SubscriptionPlan,
   CacheKeys,
   CacheTTL,
 };

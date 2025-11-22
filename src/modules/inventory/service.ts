@@ -3,6 +3,7 @@ import { getTenantModels } from '../../database/index.js';
 import { redisManager } from '../../database/redis.js';
 import { validate, ValidationError, isValidBarcode } from '../../shared/utils/validation.js';
 import { CacheKeys, CacheTTL, InventoryStatus } from '../../shared/types/index.js';
+import { buildCacheHash, invalidateCacheByPattern, swrFetch } from '../../shared/utils/cache.js';
 import {
   CreateMedicineDTO,
   UpdateMedicineDTO,
@@ -29,29 +30,44 @@ class InventoryService {
       minStockLevel: { min: 0 },
     });
 
-    if (data.barcode && !isValidBarcode(data.barcode)) {
-      throw new ValidationError({ barcode: 'Invalid barcode format' });
+    // Normalize barcode: convert empty strings to undefined
+    const normalizedBarcode = data.barcode?.trim() || undefined;
+    
+    // Validate barcode only if provided
+    if (normalizedBarcode) {
+      if (!isValidBarcode(normalizedBarcode)) {
+        throw new ValidationError({ barcode: 'Invalid barcode format. Barcode must be 8-13 digits.' });
+      }
     }
 
     const models = await getTenantModels(tenantId);
 
-    // Check for duplicate barcode
-    if (data.barcode) {
-      const existing = await models.Medicine.findOne({ barcode: data.barcode });
+    // Check for duplicate barcode only if provided
+    if (normalizedBarcode) {
+      const existing = await models.Medicine.findOne({ barcode: normalizedBarcode });
       if (existing) {
         throw new ValidationError({ barcode: 'Barcode already exists' });
       }
     }
 
-    // Create medicine
-    const medicine = await models.Medicine.create({
+    // Create medicine with normalized barcode (undefined if empty)
+    const medicineData: any = {
       ...data,
+      barcode: normalizedBarcode, // This will be undefined if not provided
       minStockLevel: data.minStockLevel || 10,
       isActive: true,
-    });
+    };
+
+    // Remove barcode from data if it's undefined to avoid saving empty strings
+    if (medicineData.barcode === undefined) {
+      delete medicineData.barcode;
+    }
+
+    const medicine = await models.Medicine.create(medicineData);
 
     // Invalidate cache
     await redisManager.del(CacheKeys.MEDICINE_LIST(tenantId));
+    await invalidateCacheByPattern([CacheKeys.MEDICINE_SEARCH_PATTERN(tenantId)]);
 
     return medicine;
   }
@@ -149,26 +165,71 @@ class InventoryService {
    * Update medicine
    */
   async updateMedicine(tenantId: string, medicineId: string, data: UpdateMedicineDTO): Promise<any> {
-    if (data.barcode && !isValidBarcode(data.barcode)) {
-      throw new ValidationError({ barcode: 'Invalid barcode format' });
-    }
-
     const models = await getTenantModels(tenantId);
 
-    // Check for duplicate barcode
-    if (data.barcode) {
-      const existing = await models.Medicine.findOne({
-        barcode: data.barcode,
-        _id: { $ne: medicineId },
-      });
-      if (existing) {
-        throw new ValidationError({ barcode: 'Barcode already exists' });
+    // Prepare update data (excluding barcode for now)
+    const updateData: any = { ...data };
+    const updateOperation: any = { $set: {} };
+
+    // Handle barcode separately
+    if (data.barcode !== undefined) {
+      // Normalize barcode: convert empty strings to undefined
+      const normalizedBarcode = data.barcode?.trim() || undefined;
+      
+      if (normalizedBarcode) {
+        // Validate barcode if provided
+        if (!isValidBarcode(normalizedBarcode)) {
+          throw new ValidationError({ barcode: 'Invalid barcode format. Barcode must be 8-13 digits.' });
+        }
+
+        // Check for duplicate barcode
+        const existing = await models.Medicine.findOne({
+          barcode: normalizedBarcode,
+          _id: { $ne: medicineId },
+        });
+        if (existing) {
+          throw new ValidationError({ barcode: 'Barcode already exists' });
+        }
+
+        // Set barcode
+        updateOperation.$set.barcode = normalizedBarcode;
+      } else {
+        // Unset barcode if empty string was provided
+        updateOperation.$unset = { barcode: '' };
       }
+      
+      // Remove barcode from updateData since we're handling it separately
+      delete updateData.barcode;
+    }
+
+    // Add other fields to $set
+    Object.keys(updateData).forEach(key => {
+      if (updateData[key] !== undefined) {
+        updateOperation.$set[key] = updateData[key];
+      }
+    });
+
+    // Build the final update operation
+    const finalUpdate: any = {};
+    if (Object.keys(updateOperation.$set).length > 0) {
+      finalUpdate.$set = updateOperation.$set;
+    }
+    if (updateOperation.$unset) {
+      finalUpdate.$unset = updateOperation.$unset;
+    }
+
+    // If no updates, return existing medicine
+    if (Object.keys(finalUpdate).length === 0) {
+      const medicine = await models.Medicine.findById(medicineId);
+      if (!medicine) {
+        throw new Error('Medicine not found');
+      }
+      return medicine;
     }
 
     const medicine = await models.Medicine.findByIdAndUpdate(
       medicineId,
-      { $set: data },
+      finalUpdate,
       { new: true, runValidators: true }
     );
 
@@ -179,6 +240,7 @@ class InventoryService {
     // Invalidate cache
     await redisManager.del(CacheKeys.MEDICINE(medicineId));
     await redisManager.del(CacheKeys.MEDICINE_LIST(tenantId));
+    await invalidateCacheByPattern([CacheKeys.MEDICINE_SEARCH_PATTERN(tenantId)]);
 
     return medicine;
   }
@@ -204,6 +266,7 @@ class InventoryService {
     // Invalidate cache
     await redisManager.del(CacheKeys.MEDICINE(medicineId));
     await redisManager.del(CacheKeys.MEDICINE_LIST(tenantId));
+    await invalidateCacheByPattern([CacheKeys.MEDICINE_SEARCH_PATTERN(tenantId)]);
   }
 
   /**
@@ -480,42 +543,56 @@ class InventoryService {
    * Search medicines (optimized for POS)
    */
   async searchMedicines(tenantId: string, query: string, limit: number = 20): Promise<any> {
-    const models = await getTenantModels(tenantId);
+    const cacheHash = buildCacheHash({ query, limit });
+    const cacheKey = CacheKeys.MEDICINE_SEARCH(tenantId, cacheHash);
 
-    // Search by name, generic name, or barcode
-    const medicines = await models.Medicine.find({
-      $or: [
-        { name: { $regex: query, $options: 'i' } },
-        { genericName: { $regex: query, $options: 'i' } },
-        { barcode: query },
-      ],
-      isActive: true,
-    })
-      .limit(limit)
-      .select('name genericName manufacturer category strength unit barcode');
+    const { data } = await swrFetch(
+      cacheKey,
+      async () => {
+        const models = await getTenantModels(tenantId);
 
-    // Get available stock for each medicine
-    const medicinesWithStock = await Promise.all(
-      medicines.map(async (medicine) => {
-        const batches = await models.InventoryBatch.find({
-          medicineId: medicine._id,
-          quantity: { $gt: 0 },
-          status: InventoryStatus.ACTIVE,
+        const medicines = await models.Medicine.find({
+          $or: [
+            { name: { $regex: query, $options: 'i' } },
+            { genericName: { $regex: query, $options: 'i' } },
+            { barcode: query },
+          ],
+          isActive: true,
         })
-          .sort({ expiryDate: 1 })
-          .select('batchNumber expiryDate quantity mrp sellingPrice');
+          .limit(limit)
+          .select('name genericName manufacturer category strength unit barcode');
 
-        const totalStock = batches.reduce((sum, batch) => sum + batch.quantity, 0);
+        const medicinesWithStock = await Promise.all(
+          medicines.map(async (medicine) => {
+            const batches = await models.InventoryBatch.find({
+              medicineId: medicine._id,
+              quantity: { $gt: 0 },
+              status: InventoryStatus.ACTIVE,
+            })
+              .sort({ expiryDate: 1 })
+              .select('batchNumber expiryDate quantity mrp sellingPrice');
 
-        return {
-          ...medicine.toObject(),
-          totalStock,
-          batches: batches.slice(0, 5), // Return only first 5 batches
-        };
-      })
+            const totalStock = batches.reduce((sum, batch) => sum + batch.quantity, 0);
+
+            return {
+              ...medicine.toObject(),
+              totalStock,
+              batches: batches.slice(0, 5),
+            };
+          })
+        );
+
+        return medicinesWithStock;
+      },
+      {
+        ttlSeconds: CacheTTL.MEDICINE_SEARCH,
+        staleSeconds: Math.floor(CacheTTL.MEDICINE_SEARCH / 2),
+        tenantId,
+        tag: 'medicine:search',
+      }
     );
 
-    return medicinesWithStock;
+    return data;
   }
 
   /**
@@ -526,6 +603,8 @@ class InventoryService {
       redisManager.del(CacheKeys.INVENTORY_SUMMARY(tenantId)),
       redisManager.del(CacheKeys.LOW_STOCK_ALERTS(tenantId)),
       redisManager.del(CacheKeys.EXPIRY_ALERTS(tenantId)),
+      redisManager.del(CacheKeys.MEDICINE_LIST(tenantId)),
+      invalidateCacheByPattern([CacheKeys.MEDICINE_SEARCH_PATTERN(tenantId)]),
     ]);
   }
 }

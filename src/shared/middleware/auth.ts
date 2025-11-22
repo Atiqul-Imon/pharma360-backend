@@ -79,9 +79,12 @@ export function requirePermission(...requiredPermissions: string[]) {
       return errorResponse(res, 'Unauthorized', 401, 'UNAUTHORIZED');
     }
 
-    const hasPermission = requiredPermissions.every((permission) =>
-      req.user!.permissions.includes(permission)
-    );
+    const userPermissions = req.user.permissions || [];
+    if (userPermissions.includes('*')) {
+      return next();
+    }
+
+    const hasPermission = requiredPermissions.every((permission) => userPermissions.includes(permission));
 
     if (!hasPermission) {
       return errorResponse(

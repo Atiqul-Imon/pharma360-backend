@@ -57,6 +57,15 @@ const medicineSchema = new Schema<IMedicine>(
       unique: true,
       sparse: true,
       trim: true,
+      default: undefined,
+      set: (value: string | undefined | null) => {
+        // Convert empty strings, null, or undefined to undefined to work properly with sparse index
+        if (value === null || value === undefined) {
+          return undefined;
+        }
+        const trimmed = String(value).trim();
+        return trimmed === '' ? undefined : trimmed;
+      },
     },
     minStockLevel: {
       type: Number,

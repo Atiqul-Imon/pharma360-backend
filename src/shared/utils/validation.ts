@@ -4,11 +4,20 @@
 
 export class ValidationError extends Error {
   public errors: Record<string, string>;
+  public meta?: Record<string, any>;
 
-  constructor(errors: Record<string, string>) {
+  constructor(errors: Record<string, string>, meta?: Record<string, any>) {
     super('Validation failed');
     this.name = 'ValidationError';
     this.errors = errors;
+    this.meta = meta;
+  }
+
+  toResponse(): { fieldErrors: Record<string, string>; meta?: Record<string, any> } {
+    return {
+      fieldErrors: this.errors,
+      meta: this.meta,
+    };
   }
 }
 

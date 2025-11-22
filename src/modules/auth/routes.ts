@@ -21,31 +21,21 @@ router.post('/change-password', authenticate, authController.changePassword);
 /**
  * User management routes (require specific roles)
  */
-router.post(
-  '/users',
-  authenticate,
-  authorize(UserRole.OWNER, UserRole.MANAGER),
-  authController.createUser
-);
+router.post('/users', authenticate, authorize(UserRole.OWNER, UserRole.ADMIN), authController.createUser);
 
-router.get(
-  '/users',
-  authenticate,
-  authorize(UserRole.OWNER, UserRole.MANAGER),
-  authController.getUsers
-);
+router.get('/users', authenticate, authorize(UserRole.OWNER, UserRole.ADMIN), authController.getUsers);
 
 router.get(
   '/users/:id',
   authenticate,
-  authorize(UserRole.OWNER, UserRole.MANAGER),
+  authorize(UserRole.OWNER, UserRole.ADMIN),
   authController.getUserById
 );
 
 router.put(
   '/users/:id',
   authenticate,
-  authorize(UserRole.OWNER, UserRole.MANAGER),
+  authorize(UserRole.OWNER, UserRole.ADMIN),
   authController.updateUser
 );
 

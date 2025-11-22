@@ -2,7 +2,7 @@ import { Types } from 'mongoose';
 import { getAdminModels } from '../../database/index.js';
 import { hashPassword, comparePassword, generateToken, generateRefreshToken } from '../../shared/utils/encryption.js';
 import { validate, ValidationError } from '../../shared/utils/validation.js';
-import { UserRole } from '../../shared/types/index.js';
+import { UserRole, Permissions, SubscriptionPlan } from '../../shared/types/index.js';
 import { RegisterTenantDTO, LoginDTO, CreateUserDTO, UpdateUserDTO, ChangePasswordDTO, AuthResponse } from './types.js';
 
 class AuthService {
@@ -42,7 +42,7 @@ class AuthService {
     }
 
     // Create tenant
-    const subscriptionPlan = data.subscriptionPlan || 'basic';
+    const subscriptionPlan = data.subscriptionPlan || SubscriptionPlan.BASIC;
     const trialPeriodDays = 30;
     const subscriptionEndDate = new Date();
     subscriptionEndDate.setDate(subscriptionEndDate.getDate() + trialPeriodDays);
@@ -338,13 +338,27 @@ class AuthService {
   private getDefaultPermissions(role: UserRole): string[] {
     switch (role) {
       case UserRole.OWNER:
-        return ['*'];
-      case UserRole.MANAGER:
-        return ['sales', 'inventory', 'customers', 'reports', 'purchases', 'users.read'];
-      case UserRole.PHARMACIST:
-        return ['sales', 'inventory.read', 'customers', 'prescriptions'];
-      case UserRole.CASHIER:
-        return ['sales', 'inventory.read', 'customers.read'];
+        return [Permissions.ALL];
+      case UserRole.ADMIN:
+        return [
+          Permissions.SALES_READ,
+          Permissions.SALES_MANAGE,
+          Permissions.INVENTORY_READ,
+          Permissions.INVENTORY_MANAGE,
+          Permissions.CUSTOMERS_MANAGE,
+          Permissions.PURCHASES_MANAGE,
+          Permissions.REPORTS_VIEW,
+          Permissions.USERS_MANAGE,
+        ];
+      case UserRole.STAFF:
+        return [
+          Permissions.SALES_READ,
+          Permissions.SALES_CREATE,
+          Permissions.INVENTORY_READ,
+          Permissions.CUSTOMERS_READ,
+          Permissions.CUSTOMERS_CREATE,
+          Permissions.CUSTOMERS_UPDATE,
+        ];
       default:
         return [];
     }

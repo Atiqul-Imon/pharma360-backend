@@ -11,7 +11,7 @@ class SupplierController {
         return errorResponse(res, 'Tenant ID not found', 400, 'NO_TENANT_ID');
       }
 
-      if (![UserRole.OWNER, UserRole.MANAGER].includes(req.user.role)) {
+      if (![UserRole.OWNER, UserRole.ADMIN].includes(req.user.role)) {
         return errorResponse(res, 'Insufficient permissions', 403, 'FORBIDDEN');
       }
 
@@ -74,7 +74,7 @@ class SupplierController {
         return errorResponse(res, 'Tenant ID not found', 400, 'NO_TENANT_ID');
       }
 
-      if (![UserRole.OWNER, UserRole.MANAGER].includes(req.user.role)) {
+      if (![UserRole.OWNER, UserRole.ADMIN].includes(req.user.role)) {
         return errorResponse(res, 'Insufficient permissions', 403, 'FORBIDDEN');
       }
 
@@ -99,7 +99,7 @@ class SupplierController {
         return errorResponse(res, 'Tenant ID not found', 400, 'NO_TENANT_ID');
       }
 
-      if (![UserRole.OWNER, UserRole.MANAGER].includes(req.user.role)) {
+      if (![UserRole.OWNER, UserRole.ADMIN].includes(req.user.role)) {
         return errorResponse(res, 'Insufficient permissions', 403, 'FORBIDDEN');
       }
 

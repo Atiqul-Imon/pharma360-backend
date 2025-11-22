@@ -1,10 +1,13 @@
 import { Types } from 'mongoose';
 import { getTenantModels } from '../../database/index.js';
+import { mongoDBManager } from '../../database/mongodb.js';
 import { redisManager } from '../../database/redis.js';
 import { io } from '../../server.js';
 import { validate, ValidationError } from '../../shared/utils/validation.js';
-import { CacheKeys, PaymentMethod, SaleStatus } from '../../shared/types/index.js';
+import { CacheKeys, InventoryStatus, PaymentMethod, SaleStatus, CounterStatus } from '../../shared/types/index.js';
 import { CreateSaleDTO, ReturnSaleDTO, SaleFilters, DailySalesReport } from './types.js';
+import { generateInvoiceNumber } from './utils/invoice.js';
+import { invalidateCacheByPattern } from '../../shared/utils/cache.js';
 
 class SalesService {
   /**
@@ -23,136 +26,191 @@ class SalesService {
     }
 
     const models = await getTenantModels(tenantId);
+    const connection = await mongoDBManager.getTenantConnection(tenantId);
+    const session = await connection.startSession();
 
-    // For local development without replica set, we'll use individual operations
-    // In production with replica set, transactions would be ideal
-    
+    let saleResult: any;
+    let attempts = 0;
+
     try {
-      // Process each item and update inventory
-      const saleItems = [];
-      let subtotal = 0;
+      while (attempts < 3) {
+        attempts += 1;
+        try {
+          await session.withTransaction(
+            async () => {
+              const now = new Date();
+              const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-      for (const item of data.items) {
-        // Get batch details
-        const batch = await models.InventoryBatch.findById(item.batchId);
-        
-        if (!batch) {
-          throw new Error(`Batch not found: ${item.batchId}`);
-        }
+              const saleItems: any[] = [];
+              let subtotal = 0;
 
-        if (batch.quantity < item.quantity) {
-          const medicine = await models.Medicine.findById(batch.medicineId);
-          throw new ValidationError({
-            items: `Insufficient stock for ${medicine?.name}. Available: ${batch.quantity}`,
-          });
-        }
+              for (const item of data.items) {
+                const batch = await models.InventoryBatch.findById(item.batchId).session(session);
 
-        // Get medicine details
-        const medicine = await models.Medicine.findById(item.medicineId);
-        
-        if (!medicine) {
-          throw new Error(`Medicine not found: ${item.medicineId}`);
-        }
+                if (!batch) {
+                  throw new ValidationError({ items: `Batch not found: ${item.batchId}` });
+                }
 
-        // Calculate item total
-        const sellingPrice = item.sellingPrice || batch.sellingPrice;
-        const discount = item.discount || 0;
-        const itemTotal = sellingPrice * item.quantity - discount;
+                if (batch.quantity < item.quantity) {
+                  const medicineLookup = await models.Medicine.findById(batch.medicineId).session(session);
+                  throw new ValidationError({
+                    items: `Insufficient stock for ${medicineLookup?.name ?? 'selected medicine'}. Available: ${batch.quantity}`,
+                  });
+                }
 
-        saleItems.push({
-          medicineId: medicine._id,
-          medicineName: medicine.name,
-          batchId: batch._id,
-          batchNumber: batch.batchNumber,
-          quantity: item.quantity,
-          mrp: batch.mrp,
-          sellingPrice,
-          discount,
-          total: itemTotal,
-        });
+                const medicine = await models.Medicine.findById(item.medicineId).session(session);
 
-        subtotal += itemTotal;
+                if (!medicine) {
+                  throw new ValidationError({ items: `Medicine not found: ${item.medicineId}` });
+                }
 
-        // Update batch quantity (without session for local development)
-        batch.quantity -= item.quantity;
-        await batch.save();
-      }
+                const sellingPrice = item.sellingPrice || batch.sellingPrice;
+                const discount = item.discount || 0;
+                const itemTotal = sellingPrice * item.quantity - discount;
 
-      // Calculate totals
-      const totalDiscount = data.totalDiscount || 0;
-      const tax = 0; // Can be calculated based on tenant settings
-      const grandTotal = subtotal - totalDiscount + tax;
+                saleItems.push({
+                  medicineId: medicine._id,
+                  medicineName: medicine.name,
+                  batchId: batch._id,
+                  batchNumber: batch.batchNumber,
+                  quantity: item.quantity,
+                  mrp: batch.mrp,
+                  sellingPrice,
+                  discount,
+                  total: itemTotal,
+                });
 
-      // Validate payment
-      if (data.amountPaid < grandTotal && data.paymentMethod !== PaymentMethod.CREDIT) {
-        throw new ValidationError({ amountPaid: 'Insufficient payment amount' });
-      }
+                subtotal += itemTotal;
 
-      const changeReturned = data.paymentMethod === PaymentMethod.CREDIT ? 0 : data.amountPaid - grandTotal;
+                batch.quantity -= item.quantity;
 
-      // Generate invoice number
-      const today = new Date();
-      const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
-      const count = await models.Sale.countDocuments({
-        createdAt: {
-          $gte: new Date(today.setHours(0, 0, 0, 0)),
-          $lt: new Date(today.setHours(23, 59, 59, 999)),
-        },
-      });
-      const invoiceNumber = `INV-${dateStr}-${String(count + 1).padStart(4, '0')}`;
+                if (batch.quantity === 0) {
+                  batch.status = InventoryStatus.OUT_OF_STOCK;
+                } else if (batch.expiryDate < now) {
+                  batch.status = InventoryStatus.EXPIRED;
+                } else if (batch.expiryDate < thirtyDaysFromNow) {
+                  batch.status = InventoryStatus.NEAR_EXPIRY;
+                } else {
+                  batch.status = InventoryStatus.ACTIVE;
+                }
 
-      // Create sale (without session for local development)
-      const sale = await models.Sale.create({
-        invoiceNumber,
-        customerId: data.customerId ? new Types.ObjectId(data.customerId) : undefined,
-        items: saleItems,
-        subtotal,
-        totalDiscount,
-        tax,
-        grandTotal,
-        paymentMethod: data.paymentMethod,
-        amountPaid: data.amountPaid,
-        changeReturned,
-        prescriptionId: data.prescriptionId ? new Types.ObjectId(data.prescriptionId) : undefined,
-        soldBy: new Types.ObjectId(userId),
-        saleType: data.saleType || 'retail',
-        saleDate: new Date(),
-        status: SaleStatus.COMPLETED,
-      });
+                await batch.save({ session });
+              }
 
-      // Update customer stats if customer ID provided (without session)
-      if (data.customerId) {
-        await models.Customer.findByIdAndUpdate(
-          data.customerId,
-          {
-            $inc: {
-              totalPurchases: grandTotal,
-              loyaltyPoints: Math.floor(grandTotal / 100), // 1 point per 100 BDT
-              ...(data.paymentMethod === PaymentMethod.CREDIT && { dueAmount: grandTotal }),
+              const totalDiscount = data.totalDiscount || 0;
+              const tax = 0;
+              const grandTotal = subtotal - totalDiscount + tax;
+
+              if (data.amountPaid < grandTotal && data.paymentMethod !== PaymentMethod.CREDIT) {
+                throw new ValidationError({ amountPaid: 'Insufficient payment amount' });
+              }
+
+              const changeReturned =
+                data.paymentMethod === PaymentMethod.CREDIT ? 0 : data.amountPaid - grandTotal;
+
+              const invoiceNumber = await generateInvoiceNumber(models.CounterSequence, session);
+
+              let counterId = data.counterId;
+              let counter = null;
+
+              if (counterId) {
+                counter = await models.Counter.findOne({
+                  _id: counterId,
+                  status: CounterStatus.ACTIVE,
+                }).session(session);
+              } else {
+                counter = await models.Counter.findOne({
+                  isDefault: true,
+                  status: CounterStatus.ACTIVE,
+                }).session(session);
+
+                if (counter) {
+                  counterId = (counter._id as Types.ObjectId).toString();
+                }
+              }
+
+              if (!counter || !counterId) {
+                throw new ValidationError({
+                  counterId: 'No active counter available. Please create or activate a counter.',
+                });
+              }
+
+              const [saleDoc] = await models.Sale.create(
+                [
+                  {
+                    invoiceNumber,
+                    customerId: data.customerId ? new Types.ObjectId(data.customerId) : undefined,
+                    items: saleItems,
+                    subtotal,
+                    totalDiscount,
+                    tax,
+                    grandTotal,
+                    paymentMethod: data.paymentMethod,
+                    amountPaid: data.amountPaid,
+                    changeReturned,
+                    prescriptionId: data.prescriptionId ? new Types.ObjectId(data.prescriptionId) : undefined,
+                    soldBy: new Types.ObjectId(userId),
+                    counterId: new Types.ObjectId(counterId),
+                    saleType: data.saleType || 'retail',
+                    saleDate: new Date(),
+                    status: SaleStatus.COMPLETED,
+                  },
+                ],
+                { session }
+              );
+
+              counter.lastSessionAt = new Date();
+              await counter.save({ session });
+
+              if (data.customerId) {
+                await models.Customer.findByIdAndUpdate(
+                  data.customerId,
+                  {
+                    $inc: {
+                      totalPurchases: grandTotal,
+                      loyaltyPoints: Math.floor(grandTotal / 100),
+                      ...(data.paymentMethod === PaymentMethod.CREDIT && { dueAmount: grandTotal }),
+                    },
+                    $set: { lastPurchaseDate: new Date() },
+                  },
+                  { session }
+                );
+              }
+
+              saleResult = saleDoc;
             },
-            $set: { lastPurchaseDate: new Date() },
+            {
+              readConcern: { level: 'snapshot' },
+              writeConcern: { w: 'majority' },
+            }
+          );
+          break;
+        } catch (error: any) {
+          if (error?.errorLabels?.includes('TransientTransactionError') && attempts < 3) {
+            continue;
           }
-        );
+          throw error;
+        }
       }
-
-      // Invalidate caches
-      await this.invalidateSalesCache(tenantId);
-
-      // Emit real-time update via Socket.IO
-      io.to(`tenant:${tenantId}`).emit('sale-created', {
-        invoiceNumber: sale.invoiceNumber,
-        grandTotal: sale.grandTotal,
-      });
-
-      // Emit inventory update
-      io.to(`tenant:${tenantId}`).emit('inventory-updated');
-
-      return sale;
-    } catch (error) {
-      // In case of error, we could implement rollback logic here
-      // For now, we'll just throw the error
-      throw error;
+    } finally {
+      await session.endSession();
     }
+
+    if (!saleResult) {
+      throw new Error('Failed to complete sale transaction');
+    }
+
+    await this.invalidateSalesCache(tenantId);
+    await invalidateCacheByPattern([CacheKeys.MEDICINE_SEARCH_PATTERN(tenantId)]);
+
+    io.to(`tenant:${tenantId}`).emit('sale-created', {
+      invoiceNumber: saleResult.invoiceNumber,
+      grandTotal: saleResult.grandTotal,
+    });
+
+    io.to(`tenant:${tenantId}`).emit('inventory-updated');
+
+    return saleResult;
   }
 
   /**
@@ -252,81 +310,110 @@ class SalesService {
    */
   async returnSale(tenantId: string, saleId: string, data: ReturnSaleDTO): Promise<any> {
     const models = await getTenantModels(tenantId);
+    const connection = await mongoDBManager.getTenantConnection(tenantId);
+    const session = await connection.startSession();
 
-    const sale = await models.Sale.findById(saleId);
-    
-    if (!sale) {
-      throw new Error('Sale not found');
-    }
-
-    if (sale.status === SaleStatus.RETURNED) {
-      throw new Error('Sale already fully returned');
-    }
+    let updatedSale: any;
+    let totalReturnAmount = 0;
 
     try {
-      let totalReturnAmount = 0;
+      await session.withTransaction(
+        async () => {
+          const sale = await models.Sale.findById(saleId).session(session);
 
-      for (const returnItem of data.items) {
-        const saleItem = sale.items[returnItem.saleItemIndex];
-        
-        if (!saleItem) {
-          throw new Error(`Invalid item index: ${returnItem.saleItemIndex}`);
-        }
-
-        if (returnItem.quantity > saleItem.quantity) {
-          throw new Error(`Return quantity exceeds sold quantity for item`);
-        }
-
-        // Return stock to inventory (without session for local development)
-        await models.InventoryBatch.findByIdAndUpdate(
-          saleItem.batchId,
-          { $inc: { quantity: returnItem.quantity } }
-        );
-
-        // Calculate return amount
-        const returnAmount = (saleItem.total / saleItem.quantity) * returnItem.quantity;
-        totalReturnAmount += returnAmount;
-
-        // Update sale item quantity
-        saleItem.quantity -= returnItem.quantity;
-        saleItem.total -= returnAmount;
-      }
-
-      // Update sale status
-      const allItemsReturned = sale.items.every((item) => item.quantity === 0);
-      sale.status = allItemsReturned ? SaleStatus.RETURNED : SaleStatus.PARTIAL_RETURN;
-      sale.grandTotal -= totalReturnAmount;
-
-      await sale.save();
-
-      // Update customer stats (without session)
-      if (sale.customerId) {
-        await models.Customer.findByIdAndUpdate(
-          sale.customerId,
-          {
-            $inc: {
-              totalPurchases: -totalReturnAmount,
-              loyaltyPoints: -Math.floor(totalReturnAmount / 100),
-            },
+          if (!sale) {
+            throw new Error('Sale not found');
           }
-        );
-      }
 
-      // Invalidate caches
-      await this.invalidateSalesCache(tenantId);
+          if (sale.status === SaleStatus.RETURNED) {
+            throw new Error('Sale already fully returned');
+          }
 
-      // Emit real-time update
-      io.to(`tenant:${tenantId}`).emit('sale-returned', {
-        invoiceNumber: sale.invoiceNumber,
-        returnAmount: totalReturnAmount,
-      });
-      io.to(`tenant:${tenantId}`).emit('inventory-updated');
+          for (const returnItem of data.items) {
+            const saleItem = sale.items[returnItem.saleItemIndex];
 
-      return sale;
-    } catch (error) {
-      // In case of error, we could implement rollback logic here
-      throw error;
+            if (!saleItem) {
+              throw new Error(`Invalid item index: ${returnItem.saleItemIndex}`);
+            }
+
+            if (returnItem.quantity > saleItem.quantity) {
+              throw new ValidationError({ items: 'Return quantity exceeds sold quantity' });
+            }
+
+            const batch = await models.InventoryBatch.findById(saleItem.batchId).session(session);
+
+            if (!batch) {
+              throw new Error('Inventory batch not found for return');
+            }
+
+            batch.quantity += returnItem.quantity;
+
+            const now = new Date();
+            const thirtyDaysFromNow = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+            if (batch.quantity === 0) {
+              batch.status = InventoryStatus.OUT_OF_STOCK;
+            } else if (batch.expiryDate < now) {
+              batch.status = InventoryStatus.EXPIRED;
+            } else if (batch.expiryDate < thirtyDaysFromNow) {
+              batch.status = InventoryStatus.NEAR_EXPIRY;
+            } else {
+              batch.status = InventoryStatus.ACTIVE;
+            }
+
+            await batch.save({ session });
+
+            const returnAmount = (saleItem.total / saleItem.quantity) * returnItem.quantity;
+            totalReturnAmount += returnAmount;
+
+            saleItem.quantity -= returnItem.quantity;
+            saleItem.total -= returnAmount;
+          }
+
+          const allItemsReturned = sale.items.every((item) => item.quantity === 0);
+          sale.status = allItemsReturned ? SaleStatus.RETURNED : SaleStatus.PARTIAL_RETURN;
+          sale.grandTotal -= totalReturnAmount;
+
+          await sale.save({ session });
+
+          if (sale.customerId) {
+            await models.Customer.findByIdAndUpdate(
+              sale.customerId,
+              {
+                $inc: {
+                  totalPurchases: -totalReturnAmount,
+                  loyaltyPoints: -Math.floor(totalReturnAmount / 100),
+                },
+              },
+              { session }
+            );
+          }
+
+          updatedSale = sale;
+        },
+        {
+          readConcern: { level: 'snapshot' },
+          writeConcern: { w: 'majority' },
+        }
+      );
+    } finally {
+      await session.endSession();
     }
+
+    await this.invalidateSalesCache(tenantId);
+    await invalidateCacheByPattern([CacheKeys.MEDICINE_SEARCH_PATTERN(tenantId)]);
+
+    if (!updatedSale) {
+      throw new Error('Failed to process sale return');
+    }
+
+    io.to(`tenant:${tenantId}`).emit('sale-returned', {
+      invoiceNumber: updatedSale.invoiceNumber,
+      returnAmount: totalReturnAmount,
+    });
+    io.to(`tenant:${tenantId}`).emit('inventory-updated');
+
+    return updatedSale;
   }
 
   /**

@@ -1,4 +1,4 @@
-import { UserRole } from '../../shared/types/index.js';
+import { UserRole, SubscriptionPlan } from '../../shared/types/index.js';
 
 export interface RegisterTenantDTO {
   // Pharmacy/Tenant info
@@ -14,7 +14,7 @@ export interface RegisterTenantDTO {
   confirmPassword: string;
   
   // Subscription
-  subscriptionPlan?: 'basic' | 'professional' | 'enterprise' | 'hospital';
+  subscriptionPlan?: SubscriptionPlan;
 }
 
 export interface LoginDTO {

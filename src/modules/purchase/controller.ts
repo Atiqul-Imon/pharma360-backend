@@ -9,6 +9,7 @@ import {
 } from '../../shared/utils/response.js';
 import { ValidationError } from '../../shared/utils/validation.js';
 import { PurchaseFilters } from './types.js';
+import { mapCreatePurchaseDTO } from './mapper.js';
 
 class PurchaseController {
   async createPurchase(req: AuthRequest, res: Response, next: NextFunction): Promise<void | Response> {
@@ -17,20 +18,22 @@ class PurchaseController {
         return errorResponse(res, 'Tenant context missing', 400, 'NO_TENANT');
       }
 
-      if (![UserRole.OWNER, UserRole.MANAGER, UserRole.PHARMACIST].includes(req.user.role)) {
+      if (![UserRole.OWNER, UserRole.ADMIN].includes(req.user.role)) {
         return errorResponse(res, 'Insufficient permissions', 403, 'FORBIDDEN');
       }
+
+      const dto = mapCreatePurchaseDTO(req.body);
 
       const purchase = await purchaseService.createPurchase(
         req.user.tenantId,
         req.user.id,
-        req.body
+        dto
       );
 
       return createdResponse(res, purchase, 'Purchase order created successfully');
     } catch (error) {
       if (error instanceof ValidationError) {
-        return errorResponse(res, 'Validation failed', 400, 'VALIDATION_ERROR', error.errors);
+        return errorResponse(res, 'Validation failed', 400, 'VALIDATION_ERROR', error.toResponse());
       }
       next(error);
     }
@@ -73,7 +76,7 @@ class PurchaseController {
       );
     } catch (error) {
       if (error instanceof ValidationError) {
-        return errorResponse(res, 'Validation failed', 400, 'VALIDATION_ERROR', error.errors);
+        return errorResponse(res, 'Validation failed', 400, 'VALIDATION_ERROR', error.toResponse());
       }
       next(error);
     }
@@ -89,7 +92,7 @@ class PurchaseController {
       return successResponse(res, purchase);
     } catch (error) {
       if (error instanceof ValidationError) {
-        return errorResponse(res, 'Validation failed', 400, 'VALIDATION_ERROR', error.errors);
+        return errorResponse(res, 'Validation failed', 400, 'VALIDATION_ERROR', error.toResponse());
       }
       next(error);
     }
@@ -101,7 +104,7 @@ class PurchaseController {
         return errorResponse(res, 'Tenant context missing', 400, 'NO_TENANT');
       }
 
-      if (![UserRole.OWNER, UserRole.MANAGER, UserRole.PHARMACIST].includes(req.user.role)) {
+      if (![UserRole.OWNER, UserRole.ADMIN].includes(req.user.role)) {
         return errorResponse(res, 'Insufficient permissions', 403, 'FORBIDDEN');
       }
 
@@ -115,7 +118,7 @@ class PurchaseController {
       return successResponse(res, purchase, 'Purchase received successfully');
     } catch (error) {
       if (error instanceof ValidationError) {
-        return errorResponse(res, 'Validation failed', 400, 'VALIDATION_ERROR', error.errors);
+        return errorResponse(res, 'Validation failed', 400, 'VALIDATION_ERROR', error.toResponse());
       }
       next(error);
     }
@@ -127,7 +130,7 @@ class PurchaseController {
         return errorResponse(res, 'Tenant context missing', 400, 'NO_TENANT');
       }
 
-      if (![UserRole.OWNER, UserRole.MANAGER].includes(req.user.role)) {
+      if (![UserRole.OWNER, UserRole.ADMIN].includes(req.user.role)) {
         return errorResponse(res, 'Insufficient permissions', 403, 'FORBIDDEN');
       }
 
@@ -141,7 +144,7 @@ class PurchaseController {
       return successResponse(res, purchase, 'Payment recorded successfully');
     } catch (error) {
       if (error instanceof ValidationError) {
-        return errorResponse(res, 'Validation failed', 400, 'VALIDATION_ERROR', error.errors);
+        return errorResponse(res, 'Validation failed', 400, 'VALIDATION_ERROR', error.toResponse());
       }
       next(error);
     }
@@ -153,7 +156,7 @@ class PurchaseController {
         return errorResponse(res, 'Tenant context missing', 400, 'NO_TENANT');
       }
 
-      if (![UserRole.OWNER, UserRole.MANAGER].includes(req.user.role)) {
+      if (![UserRole.OWNER, UserRole.ADMIN].includes(req.user.role)) {
         return errorResponse(res, 'Insufficient permissions', 403, 'FORBIDDEN');
       }
 

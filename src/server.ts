@@ -5,6 +5,7 @@ import compression from 'compression';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import { createServer } from 'http';
+import { createServer as createNetServer } from 'net';
 import { Server as SocketIOServer } from 'socket.io';
 
 // Database connections
@@ -28,7 +29,7 @@ const io = new SocketIOServer(httpServer, {
 });
 
 // Port configuration
-const PORT = process.env.PORT || 5000;
+const PREFERRED_PORT = Number(process.env.PORT) || 5000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
 /**
@@ -90,6 +91,7 @@ import customerRoutes from './modules/customer/routes.js';
 import adminRoutes from './modules/admin/routes.js';
 import purchaseRoutes from './modules/purchase/routes.js';
 import supplierRoutes from './modules/supplier/routes.js';
+import counterRoutes from './modules/counter/routes.js';
 
 app.use('/api/v1/auth', authRoutes);
 app.use('/api/v1/inventory', inventoryRoutes);
@@ -98,6 +100,7 @@ app.use('/api/v1/customers', customerRoutes);
 app.use('/api/v1/admin', adminRoutes);
 app.use('/api/v1/purchases', purchaseRoutes);
 app.use('/api/v1/suppliers', supplierRoutes);
+app.use('/api/v1/counters', counterRoutes);
 
 /**
  * Error handlers (must be last)
@@ -138,12 +141,18 @@ async function startServer() {
     // Connect to Redis
     await redisManager.connect();
 
+    const { port: portToUse, wasPreferred } = await findAvailablePort(PREFERRED_PORT);
+
+    if (!wasPreferred) {
+      console.warn(`⚠️ Port ${PREFERRED_PORT} is in use. Switched to available port ${portToUse}.`);
+    }
+
     // Start server
-    httpServer.listen(PORT, () => {
+    httpServer.listen(portToUse, () => {
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
-      console.log(`✅ Server running on port ${PORT}`);
-      console.log(`🌐 API: http://localhost:${PORT}`);
-      console.log(`🏥 Health: http://localhost:${PORT}/health`);
+      console.log(`✅ Server running on port ${portToUse}`);
+      console.log(`🌐 API: http://localhost:${portToUse}`);
+      console.log(`🏥 Health: http://localhost:${portToUse}/health`);
       console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     });
   } catch (error) {
@@ -187,4 +196,37 @@ process.on('SIGINT', async () => {
 
 // Start the server
 startServer();
+
+async function findAvailablePort(preferredPort: number, maxOffset = 10): Promise<{ port: number; wasPreferred: boolean }> {
+  for (let offset = 0; offset <= maxOffset; offset += 1) {
+    const portToCheck = preferredPort + offset;
+    const available = await isPortAvailable(portToCheck);
+
+    if (available) {
+      return { port: portToCheck, wasPreferred: offset === 0 };
+    }
+  }
+
+  throw new Error(`No available ports found in range ${preferredPort}-${preferredPort + maxOffset}`);
+}
+
+function isPortAvailable(port: number): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const tester = createNetServer();
+
+    tester.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE' || err.code === 'EACCES') {
+        resolve(false);
+      } else {
+        reject(err);
+      }
+    });
+
+    tester.once('listening', () => {
+      tester.close(() => resolve(true));
+    });
+
+    tester.listen(port, '0.0.0.0');
+  });
+}
 

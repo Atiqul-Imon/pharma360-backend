@@ -1,5 +1,6 @@
 import { Types } from 'mongoose';
 import { getTenantModels } from '../../database/index.js';
+import { mongoDBManager } from '../../database/mongodb.js';
 import { redisManager } from '../../database/redis.js';
 import { io } from '../../server.js';
 import {
@@ -84,202 +85,240 @@ class PurchaseService {
     }
 
     const items = this.normalizeItems(data.items);
+
+    const connection = await mongoDBManager.getTenantConnection(tenantId);
+    const session = await connection.startSession();
     const models = await getTenantModels(tenantId);
 
-    const supplier = await models.Supplier.findById(data.supplierId);
-    if (!supplier) {
-      throw new ValidationError({ supplierId: 'Supplier not found' });
-    }
-
-    if (!supplier.isActive) {
-      throw new ValidationError({ supplierId: 'Supplier is inactive' });
-    }
-
-    const orderDate = data.orderDate ? new Date(data.orderDate) : new Date();
-    if (Number.isNaN(orderDate.getTime())) {
-      throw new ValidationError({ orderDate: 'Invalid order date' });
-    }
-
-    const expectedDeliveryDate = data.expectedDeliveryDate
+    const operationStartedAt = Date.now();
+    let purchase: any;
+    let supplierSnapshot: { id: Types.ObjectId; name: string } | undefined;
+    let orderDate: Date = data.orderDate ? new Date(data.orderDate) : new Date();
+    let expectedDeliveryDate: Date | undefined = data.expectedDeliveryDate
       ? new Date(data.expectedDeliveryDate)
       : undefined;
-    if (expectedDeliveryDate && Number.isNaN(expectedDeliveryDate.getTime())) {
-      throw new ValidationError({ expectedDeliveryDate: 'Invalid expected delivery date' });
-    }
 
-    const purchaseItems = [];
-    let subtotal = 0;
+    try {
+      await session.withTransaction(async () => {
+        if (Number.isNaN(orderDate.getTime())) {
+          throw new ValidationError({ orderDate: 'Invalid order date' });
+        }
 
-    const seenBatchKeys = new Set<string>();
+        if (expectedDeliveryDate && Number.isNaN(expectedDeliveryDate.getTime())) {
+          throw new ValidationError({ expectedDeliveryDate: 'Invalid expected delivery date' });
+        }
 
-    for (const item of items) {
-      if (!isValidObjectId(item.medicineId)) {
-        throw new ValidationError({ medicineId: 'Invalid medicine ID provided' });
-      }
+        const supplier = await models.Supplier.findById(data.supplierId).session(session);
+        if (!supplier) {
+          throw new ValidationError({ supplierId: 'Supplier not found' });
+        }
 
-      const medicine = (await models.Medicine.findById(item.medicineId)) as any;
-      if (!medicine) {
-        throw new ValidationError({ items: `Medicine not found: ${item.medicineId}` });
-      }
+        if (!supplier.isActive) {
+          throw new ValidationError({ supplierId: 'Supplier is inactive' });
+        }
 
-      const quantity = Number(item.quantity);
-      if (!Number.isFinite(quantity) || quantity <= 0) {
-        throw new ValidationError({
-          items: `Quantity must be greater than zero for ${medicine.name}`,
-        });
-      }
+        supplierSnapshot = {
+          id: supplier._id as Types.ObjectId,
+          name: supplier.companyName,
+        };
 
-      const freeQuantity = Number(item.freeQuantity ?? 0);
-      if (!Number.isFinite(freeQuantity) || freeQuantity < 0) {
-        throw new ValidationError({
-          items: `Free quantity cannot be negative for ${medicine.name}`,
-        });
-      }
+        const purchaseItems = [];
+        let subtotal = 0;
+        const seenBatchKeys = new Set<string>();
 
-      const purchasePrice = Number(item.purchasePrice);
-      if (!Number.isFinite(purchasePrice) || purchasePrice < 0) {
-        throw new ValidationError({
-          items: `Purchase price must be zero or greater for ${medicine.name}`,
-        });
-      }
+        for (const item of items) {
+          if (!isValidObjectId(item.medicineId)) {
+            throw new ValidationError({ medicineId: 'Invalid medicine ID provided' });
+          }
 
-      const sellingPrice = Number(item.sellingPrice);
-      if (!Number.isFinite(sellingPrice) || sellingPrice < 0) {
-        throw new ValidationError({
-          items: `Selling price must be zero or greater for ${medicine.name}`,
-        });
-      }
+          const medicine = (await models.Medicine.findById(item.medicineId).session(session)) as any;
+          if (!medicine) {
+            throw new ValidationError({ items: `Medicine not found: ${item.medicineId}` });
+          }
 
-      const mrp = Number(item.mrp);
-      if (!Number.isFinite(mrp) || mrp < 0) {
-        throw new ValidationError({ items: `MRP must be zero or greater for ${medicine.name}` });
-      }
+          const quantity = item.quantity;
+          if (!Number.isFinite(quantity) || quantity <= 0) {
+            throw new ValidationError({
+              items: `Quantity must be greater than zero for ${medicine.name}`,
+            });
+          }
 
-      const expiryDate = new Date(item.expiryDate);
-      if (Number.isNaN(expiryDate.getTime())) {
-        throw new ValidationError({
-          items: `Invalid expiry date for ${medicine.name}`,
-        });
-      }
+          const freeQuantity = item.freeQuantity ?? 0;
+          if (!Number.isFinite(freeQuantity) || freeQuantity < 0) {
+            throw new ValidationError({
+              items: `Free quantity cannot be negative for ${medicine.name}`,
+            });
+          }
 
-      if (!item.batchNumber?.trim()) {
-        throw new ValidationError({
-          items: `Batch number is required for ${medicine.name}`,
-        });
-      }
+          const purchasePrice = item.purchasePrice;
+          if (!Number.isFinite(purchasePrice) || purchasePrice < 0) {
+            throw new ValidationError({
+              items: `Purchase price must be zero or greater for ${medicine.name}`,
+            });
+          }
 
-      const batchKey = `${medicine._id.toString()}::${item.batchNumber.trim()}`;
-      if (seenBatchKeys.has(batchKey)) {
-        throw new ValidationError({
-          items: `Duplicate batch number ${item.batchNumber} for ${medicine.name}`,
-        });
-      }
-      seenBatchKeys.add(batchKey);
+          const sellingPrice = item.sellingPrice;
+          if (!Number.isFinite(sellingPrice) || sellingPrice < 0) {
+            throw new ValidationError({
+              items: `Selling price must be zero or greater for ${medicine.name}`,
+            });
+          }
 
-      const lineTotal = quantity * purchasePrice;
+          const mrp = item.mrp;
+          if (!Number.isFinite(mrp) || mrp < 0) {
+            throw new ValidationError({
+              items: `MRP must be zero or greater for ${medicine.name}`,
+            });
+          }
 
-      purchaseItems.push({
-        medicineId: medicine._id,
-        medicineName: medicine.name,
-        batchNumber: item.batchNumber.trim(),
-        quantity,
-        freeQuantity,
-        purchasePrice,
-        sellingPrice,
-        mrp,
-        expiryDate,
-        receivedQuantity: 0,
-        receivedFreeQuantity: 0,
-        total: lineTotal,
-        alertThreshold: item.alertThreshold,
-        notes: item.notes,
+          const expiryDate = item.expiryDate instanceof Date
+            ? item.expiryDate
+            : new Date(item.expiryDate);
+          if (Number.isNaN(expiryDate.getTime())) {
+            throw new ValidationError({
+              items: `Invalid expiry date for ${medicine.name}`,
+            });
+          }
+
+          const batchNumber = item.batchNumber?.trim();
+          if (!batchNumber) {
+            throw new ValidationError({
+              items: `Batch number is required for ${medicine.name}`,
+            });
+          }
+
+          const batchKey = `${medicine._id.toString()}::${batchNumber}`;
+          if (seenBatchKeys.has(batchKey)) {
+            throw new ValidationError({
+              items: `Duplicate batch number ${batchNumber} for ${medicine.name}`,
+            });
+          }
+          seenBatchKeys.add(batchKey);
+
+          const lineTotal = quantity * purchasePrice;
+
+          purchaseItems.push({
+            medicineId: medicine._id,
+            medicineName: medicine.name,
+            batchNumber,
+            quantity,
+            freeQuantity,
+            purchasePrice,
+            sellingPrice,
+            mrp,
+            expiryDate,
+            receivedQuantity: 0,
+            receivedFreeQuantity: 0,
+            total: lineTotal,
+            alertThreshold: item.alertThreshold,
+            notes: item.notes,
+          });
+
+          subtotal += lineTotal;
+        }
+
+        const discount = data.discount ?? 0;
+        const tax = data.tax ?? 0;
+        const amountPaid = data.amountPaid ?? 0;
+
+        if (discount > subtotal) {
+          throw new ValidationError({ discount: 'Discount cannot exceed subtotal' });
+        }
+
+        const grandTotal = subtotal - discount + tax;
+        if (grandTotal < 0) {
+          throw new ValidationError({ grandTotal: 'Grand total cannot be negative' });
+        }
+
+        if (amountPaid > grandTotal) {
+          throw new ValidationError({ amountPaid: 'Amount paid cannot exceed grand total' });
+        }
+
+        if (amountPaid > 0 && !data.initialPaymentMethod) {
+          throw new ValidationError({
+            initialPaymentMethod: 'Payment method is required when amount paid is provided',
+          });
+        }
+
+        const dueAmount = Math.max(0, grandTotal - amountPaid);
+        const paymentStatus = this.resolvePaymentStatus(grandTotal, amountPaid);
+        const purchaseOrderNumber = await this.generatePurchaseOrderNumber(models, orderDate);
+
+        const [createdPurchase] = await models.Purchase.create(
+          [
+            {
+              purchaseOrderNumber,
+              supplierInvoiceNumber: data.supplierInvoiceNumber || undefined,
+              supplierId: new Types.ObjectId(data.supplierId),
+              orderDate,
+              expectedDeliveryDate,
+              items: purchaseItems,
+              subtotal,
+              discount,
+              tax,
+              grandTotal,
+              amountPaid,
+              dueAmount,
+              paymentStatus,
+              status: PurchaseStatus.ORDERED,
+              createdBy: new Types.ObjectId(userId),
+              notes: data.notes,
+              payments:
+                amountPaid > 0
+                  ? [
+                      {
+                        amount: amountPaid,
+                        paymentMethod: data.initialPaymentMethod,
+                        paidAt: new Date(),
+                        recordedBy: new Types.ObjectId(userId),
+                      },
+                    ]
+                  : [],
+            },
+          ],
+          { session }
+        );
+
+        purchase = createdPurchase;
+
+        await models.Supplier.findByIdAndUpdate(
+          data.supplierId,
+          {
+            $inc: {
+              totalPurchases: grandTotal,
+              currentDue: dueAmount,
+            },
+            $set: {
+              lastPurchaseDate: orderDate,
+            },
+          },
+          { new: true, session }
+        );
       });
 
-      subtotal += lineTotal;
-    }
+      if (!purchase) {
+        throw new Error('Purchase creation failed');
+      }
 
-    const discount = Number(data.discount ?? 0);
-    const tax = Number(data.tax ?? 0);
-    const amountPaid = Number(data.amountPaid ?? 0);
+      if (supplierSnapshot) {
+        io.to(`tenant:${tenantId}`).emit('purchase-created', {
+          purchaseOrderNumber: purchase.purchaseOrderNumber,
+          grandTotal: purchase.grandTotal,
+          supplier: supplierSnapshot,
+        });
+      }
 
-    if (discount > subtotal) {
-      throw new ValidationError({ discount: 'Discount cannot exceed subtotal' });
-    }
-
-    const grandTotal = subtotal - discount + tax;
-    if (grandTotal < 0) {
-      throw new ValidationError({ grandTotal: 'Grand total cannot be negative' });
-    }
-
-    if (amountPaid > grandTotal) {
-      throw new ValidationError({ amountPaid: 'Amount paid cannot exceed grand total' });
-    }
-
-    if (amountPaid > 0 && !data.initialPaymentMethod) {
-      throw new ValidationError({
-        initialPaymentMethod: 'Payment method is required when amount paid is provided',
+      return purchase;
+    } finally {
+      await session.endSession();
+      const durationMs = Date.now() - operationStartedAt;
+      console.info('[PurchaseService] createPurchase', {
+        tenantId,
+        durationMs,
+        purchaseId: purchase?._id?.toString(),
+        success: Boolean(purchase),
       });
     }
-
-    const dueAmount = Math.max(0, grandTotal - amountPaid);
-    const paymentStatus = this.resolvePaymentStatus(grandTotal, amountPaid);
-
-    const purchaseOrderNumber = await this.generatePurchaseOrderNumber(models, orderDate);
-
-    const purchase = await models.Purchase.create({
-      purchaseOrderNumber,
-      supplierInvoiceNumber: data.supplierInvoiceNumber?.trim() || undefined,
-      supplierId: new Types.ObjectId(data.supplierId),
-      orderDate,
-      expectedDeliveryDate,
-      items: purchaseItems,
-      subtotal,
-      discount,
-      tax,
-      grandTotal,
-      amountPaid,
-      dueAmount,
-      paymentStatus,
-      status: PurchaseStatus.ORDERED,
-      createdBy: new Types.ObjectId(userId),
-      notes: data.notes?.trim(),
-      payments:
-        amountPaid > 0
-          ? [
-              {
-                amount: amountPaid,
-                paymentMethod: data.initialPaymentMethod,
-                paidAt: new Date(),
-                recordedBy: new Types.ObjectId(userId),
-              },
-            ]
-          : [],
-    });
-
-    await models.Supplier.findByIdAndUpdate(
-      data.supplierId,
-      {
-        $inc: {
-          totalPurchases: grandTotal,
-          currentDue: dueAmount,
-        },
-        $set: {
-          lastPurchaseDate: orderDate,
-        },
-      },
-      { new: true }
-    );
-
-    io.to(`tenant:${tenantId}`).emit('purchase-created', {
-      purchaseOrderNumber,
-      grandTotal,
-      supplier: {
-        id: supplier._id,
-        name: supplier.companyName,
-      },
-    });
-
-    return purchase;
   }
 
   async getPurchases(

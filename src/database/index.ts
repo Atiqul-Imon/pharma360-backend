@@ -19,6 +19,8 @@ import { createPrescriptionModel } from './models/tenant/Prescription.js';
 import { createSupplierModel } from './models/tenant/Supplier.js';
 import { createDoctorModel } from './models/tenant/Doctor.js';
 import { createDailySummaryModel } from './models/tenant/DailySummary.js';
+import { createCounterModel } from './models/tenant/Counter.js';
+import { createCounterSequenceModel } from './models/tenant/CounterSequence.js';
 
 /**
  * Get admin database models
@@ -48,6 +50,8 @@ export async function getTenantModels(tenantId: string) {
     Supplier: createSupplierModel(connection),
     Doctor: createDoctorModel(connection),
     DailySummary: createDailySummaryModel(connection),
+    Counter: createCounterModel(connection),
+    CounterSequence: createCounterSequenceModel(connection),
   };
 }
 

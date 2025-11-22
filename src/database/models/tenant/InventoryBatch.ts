@@ -94,6 +94,7 @@ inventoryBatchSchema.index({ medicineId: 1, expiryDate: 1, quantity: 1 });
 inventoryBatchSchema.index({ expiryDate: 1, status: 1 }); // Expiry alerts
 inventoryBatchSchema.index({ quantity: 1, status: 1 }); // Low stock
 inventoryBatchSchema.index({ status: 1, medicineId: 1 });
+inventoryBatchSchema.index({ medicineId: 1, status: 1, expiryDate: 1 });
 inventoryBatchSchema.index({ batchNumber: 1, medicineId: 1 }, { unique: true });
 
 // Pre-save hook to auto-update status based on quantity and expiry

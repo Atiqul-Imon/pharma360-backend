@@ -84,7 +84,7 @@ class AdminService {
       email: data.email, 
       role: 'admin',
       isActive: true 
-    });
+    }).select('+password');
 
     if (!admin) {
       throw new ValidationError({ email: 'Invalid email or password' });

@@ -16,6 +16,7 @@ export interface CreateSaleDTO {
   amountPaid: number;
   prescriptionId?: string;
   saleType?: 'retail' | 'wholesale' | 'insurance';
+  counterId?: string;
 }
 
 export interface ReturnSaleDTO {

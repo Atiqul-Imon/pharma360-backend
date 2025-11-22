@@ -26,6 +26,7 @@ export interface ISale extends Document {
   changeReturned: number;
   prescriptionId?: Types.ObjectId;
   soldBy: Types.ObjectId;
+  counterId?: Types.ObjectId;
   saleType: string;
   saleDate: Date;
   status: SaleStatus;
@@ -145,6 +146,10 @@ const saleSchema = new Schema<ISale>(
       type: Schema.Types.ObjectId,
       required: true,
     },
+    counterId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Counter',
+    },
     saleType: {
       type: String,
       enum: ['retail', 'wholesale', 'insurance'],
@@ -175,6 +180,7 @@ saleSchema.index({ saleDate: -1 }); // Recent sales first
 saleSchema.index({ customerId: 1, saleDate: -1 });
 saleSchema.index({ 'items.medicineId': 1, saleDate: -1 }); // Medicine-wise sales
 saleSchema.index({ soldBy: 1, saleDate: -1 }); // Employee performance
+saleSchema.index({ counterId: 1, saleDate: -1 }); // Counter performance
 saleSchema.index({ status: 1, saleDate: -1 });
 
 // Compound index for daily/monthly reports (critical for analytics)

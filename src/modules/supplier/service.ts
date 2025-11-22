@@ -1,6 +1,8 @@
 import { Types } from 'mongoose';
 import { getTenantModels } from '../../database/index.js';
 import { validate, ValidationError } from '../../shared/utils/validation.js';
+import { CacheKeys, CacheTTL } from '../../shared/types/index.js';
+import { buildCacheHash, invalidateCacheByPattern, swrFetch } from '../../shared/utils/cache.js';
 import { CreateSupplierDTO, UpdateSupplierDTO, SupplierFilters, SupplierPaymentSummary } from './types.js';
 
 class SupplierService {
@@ -41,6 +43,8 @@ class SupplierService {
       rating: data.rating ?? 5,
     });
 
+    await invalidateCacheByPattern([CacheKeys.SUPPLIER_LIST_PATTERN(tenantId)]);
+
     return supplier;
   }
 
@@ -50,46 +54,70 @@ class SupplierService {
     limit: number = 25,
     filters: SupplierFilters = {}
   ): Promise<any> {
-    const models = await getTenantModels(tenantId);
-    const skip = (page - 1) * limit;
-    const query: any = {};
+    const cacheHash = buildCacheHash({
+      page,
+      limit,
+      search: filters.search ?? null,
+      isActive: filters.isActive ?? null,
+      minDue: filters.minDue ?? null,
+      maxDue: filters.maxDue ?? null,
+    });
 
-    if (filters.search) {
-      query.$or = [
-        { companyName: { $regex: filters.search, $options: 'i' } },
-        { name: { $regex: filters.search, $options: 'i' } },
-        { phone: { $regex: filters.search, $options: 'i' } },
-      ];
-    }
+    const cacheKey = CacheKeys.SUPPLIER_LIST(tenantId, cacheHash);
 
-    if (filters.isActive !== undefined) {
-      query.isActive = filters.isActive;
-    }
+    const { data } = await swrFetch(
+      cacheKey,
+      async () => {
+        const models = await getTenantModels(tenantId);
+        const skip = (page - 1) * limit;
+        const query: any = {};
 
-    if (filters.minDue !== undefined || filters.maxDue !== undefined) {
-      query.currentDue = {};
-      if (filters.minDue !== undefined) {
-        query.currentDue.$gte = filters.minDue;
-      }
-      if (filters.maxDue !== undefined) {
-        query.currentDue.$lte = filters.maxDue;
-      }
-    }
+        if (filters.search) {
+          query.$or = [
+            { companyName: { $regex: filters.search, $options: 'i' } },
+            { name: { $regex: filters.search, $options: 'i' } },
+            { phone: { $regex: filters.search, $options: 'i' } },
+          ];
+        }
 
-    const [suppliers, total] = await Promise.all([
-      models.Supplier.find(query).skip(skip).limit(limit).sort({ createdAt: -1 }),
-      models.Supplier.countDocuments(query),
-    ]);
+        if (filters.isActive !== undefined) {
+          query.isActive = filters.isActive;
+        }
 
-    return {
-      suppliers,
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit),
+        if (filters.minDue !== undefined || filters.maxDue !== undefined) {
+          query.currentDue = {};
+          if (filters.minDue !== undefined) {
+            query.currentDue.$gte = filters.minDue;
+          }
+          if (filters.maxDue !== undefined) {
+            query.currentDue.$lte = filters.maxDue;
+          }
+        }
+
+        const [suppliers, total] = await Promise.all([
+          models.Supplier.find(query).skip(skip).limit(limit).sort({ createdAt: -1 }),
+          models.Supplier.countDocuments(query),
+        ]);
+
+        return {
+          suppliers,
+          pagination: {
+            page,
+            limit,
+            total,
+            totalPages: Math.ceil(total / limit),
+          },
+        };
       },
-    };
+      {
+        ttlSeconds: CacheTTL.SUPPLIER_LIST,
+        staleSeconds: Math.floor(CacheTTL.SUPPLIER_LIST / 2),
+        tenantId,
+        tag: 'supplier:list',
+      }
+    );
+
+    return data;
   }
 
   async getSupplierById(tenantId: string, supplierId: string): Promise<any> {
@@ -149,6 +177,8 @@ class SupplierService {
       throw new Error('Supplier not found');
     }
 
+    await invalidateCacheByPattern([CacheKeys.SUPPLIER_LIST_PATTERN(tenantId)]);
+
     return supplier;
   }
 
@@ -168,6 +198,8 @@ class SupplierService {
     if (!supplier) {
       throw new Error('Supplier not found');
     }
+
+    await invalidateCacheByPattern([CacheKeys.SUPPLIER_LIST_PATTERN(tenantId)]);
 
     return supplier;
   }
@@ -196,6 +228,8 @@ class SupplierService {
     }
 
     await models.Supplier.findByIdAndDelete(supplierId);
+
+    await invalidateCacheByPattern([CacheKeys.SUPPLIER_LIST_PATTERN(tenantId)]);
   }
 
   async getSupplierPurchaseSummary(

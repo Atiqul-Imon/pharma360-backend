@@ -1,5 +1,5 @@
 import mongoose, { Schema, Model } from 'mongoose';
-import { ITenant } from '../../../shared/types/index.js';
+import { ITenant, SubscriptionPlan } from '../../../shared/types/index.js';
 
 const tenantSchema = new Schema<ITenant>(
   {
@@ -39,8 +39,8 @@ const tenantSchema = new Schema<ITenant>(
     },
     subscriptionPlan: {
       type: String,
-      enum: ['basic', 'professional', 'enterprise', 'hospital'],
-      default: 'basic',
+      enum: Object.values(SubscriptionPlan),
+      default: SubscriptionPlan.BASIC,
       index: true,
     },
     subscriptionStatus: {
